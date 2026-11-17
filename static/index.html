@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Hybrid RAG</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <main>
+    <header>
+      <div>
+        <h1>Hybrid RAG</h1>
+        <p class="muted">pgvector + BM25 · Reciprocal Rank Fusion · cited answers</p>
+      </div>
+      <input id="api-key" type="password" placeholder="API key" autocomplete="off" aria-label="API key">
+    </header>
+
+    <section class="card">
+      <h2>Documents</h2>
+      <form id="upload-form">
+        <input type="file" id="files" accept=".pdf,.txt,.md" multiple required>
+        <button type="submit">Upload</button>
+      </form>
+      <ul id="ingest-log" class="log"></ul>
+      <table>
+        <thead><tr><th>File</th><th>Status</th><th>Chunks</th><th></th></tr></thead>
+        <tbody id="docs"></tbody>
+      </table>
+    </section>
+
+    <section class="card chat">
+      <div id="messages" aria-live="polite">
+        <p class="muted empty">Enter your API key, upload documents, then ask a question.</p>
+      </div>
+      <form id="ask-form">
+        <button type="button" id="new-chat" class="secondary" title="Forget the conversation so far">New chat</button>
+        <input id="question" type="text" placeholder="Ask about your documents…" autocomplete="off" maxlength="2000" required>
+        <button type="submit">Ask</button>
+      </form>
+    </section>
+  </main>
+  <script src="/app.js" type="module"></script>
+</body>
+</html>

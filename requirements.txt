@@ -1,0 +1,14 @@
+fastapi==0.163.1
+uvicorn[standard]==0.54.0
+python-multipart==0.0.34
+pydantic-settings==2.16.3
+python-dotenv==1.2.4
+asyncpg==0.32.0
+openai==3.52.0
+pypdf==7.1.0
+pypdfium2==5.15.2
+pillow==13.0.0
+langsmith==0.15.0
+bm25s==0.3.16
+PyStemmer==3.1.0
+numpy==2.5.5
