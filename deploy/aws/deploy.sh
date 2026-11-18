@@ -84,7 +84,8 @@ setup() {
     --template-file "$ROOT/deploy/aws/demo-stack.yaml" --capabilities CAPABILITY_IAM \
     --no-fail-on-empty-changeset \
     --parameter-overrides AlertEmail="$email" OriginSecret="$origin_secret" \
-      CloudFrontPrefixListId="$prefix_list" RepoSshUrl="git@github.com:$REPO.git"
+      CloudFrontPrefixListId="$prefix_list" RepoSshUrl="git@github.com:$REPO.git" \
+      MonthlyBudgetUsd="${BUDGET_USD:-21}"
 
   url=$(output Url)
   smoke_test "$url"

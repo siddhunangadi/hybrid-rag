@@ -28,7 +28,7 @@ Parameters:
     Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64
   MonthlyBudgetUsd:
     Type: Number
-    Default: 15
+    Default: 21
 
 Resources:
   # ---------- network: only CloudFront may reach the instance, and only on port 80 ----------
