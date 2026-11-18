@@ -73,6 +73,9 @@ setup() {
     --query 'PrefixLists[0].[PrefixListId,MaxEntries]' --output text)
   rule_limit=$(aws service-quotas get-service-quota --region "$REGION" --service-code vpc \
     --quota-code L-0EA8095F --query Quota.Value --output text 2>/dev/null || echo 60)
+  # AWS-managed prefix lists don't report MaxEntries; CloudFront's origin-facing list counts as 55 rules.
+  [[ "$weight" =~ ^[0-9]+$ ]] || weight=55
+  [[ "${rule_limit%.*}" =~ ^[0-9]+$ ]] || rule_limit=60
   if (( weight > ${rule_limit%.*} )); then
     echo "the CloudFront prefix list counts as $weight rules but security groups allow ${rule_limit%.*};" \
          "request a higher 'Inbound or outbound rules per security group' quota" >&2
