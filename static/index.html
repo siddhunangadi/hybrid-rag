@@ -2,44 +2,123 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Hybrid RAG</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#fbfbfd" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
+  <meta name="description" content="Ask questions about your documents and get answers that cite the exact passage and page.">
+  <title>Hybrid RAG · Ask your documents</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230071e3'/%3E%3Ccircle cx='13' cy='16' r='6' fill='none' stroke='white' stroke-width='2.4'/%3E%3Ccircle cx='19' cy='16' r='6' fill='none' stroke='white' stroke-width='2.4' opacity='.7'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-  <main>
-    <header>
-      <div>
-        <h1>Hybrid RAG</h1>
-        <p class="muted">pgvector + BM25 · Reciprocal Rank Fusion · cited answers</p>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <button class="icon-btn only-narrow" id="open-library" type="button" aria-label="Show library">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
+      </button>
+      <a class="brand" href="/" aria-label="Hybrid RAG home">
+        <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true">
+          <rect width="32" height="32" rx="8"/>
+          <circle cx="13" cy="16" r="6"/>
+          <circle cx="19" cy="16" r="6"/>
+        </svg>
+        <span>Hybrid RAG</span>
+      </a>
+      <div class="topbar-actions">
+        <span class="conn" id="conn" data-state="off" role="status">
+          <span class="conn-dot"></span><span class="conn-label">Not connected</span>
+        </span>
+        <button class="btn-quiet" id="new-chat" type="button">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+          <span>New chat</span>
+        </button>
+        <button class="icon-btn" id="open-settings" type="button" aria-label="Connection settings">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="8" cy="15" r="4"/><path d="M11 12l9-9M17 6l3 3M15 8l2 2"/></svg>
+        </button>
       </div>
-      <input id="api-key" type="password" placeholder="API key" autocomplete="off" aria-label="API key">
-    </header>
+    </div>
+  </header>
 
-    <section class="card">
-      <h2>Documents</h2>
-      <form id="upload-form">
-        <input type="file" id="files" accept=".pdf,.txt,.md" multiple required>
-        <button type="submit">Upload</button>
-      </form>
-      <ul id="ingest-log" class="log"></ul>
-      <table>
-        <thead><tr><th>File</th><th>Status</th><th>Chunks</th><th></th></tr></thead>
-        <tbody id="docs"></tbody>
-      </table>
-    </section>
-
-    <section class="card chat">
-      <div id="messages" aria-live="polite">
-        <p class="muted empty">Enter your API key, upload documents, then ask a question.</p>
+  <div class="shell">
+    <aside class="library" id="library" aria-label="Library">
+      <div class="library-head">
+        <h2>Library</h2>
+        <span class="count" id="doc-count"></span>
+        <button class="icon-btn only-narrow" id="close-library" type="button" aria-label="Hide library">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+        </button>
       </div>
-      <form id="ask-form">
-        <button type="button" id="new-chat" class="secondary" title="Forget the conversation so far">New chat</button>
-        <input id="question" type="text" placeholder="Ask about your documents…" autocomplete="off" maxlength="2000" required>
-        <button type="submit">Ask</button>
+
+      <button class="dropzone" id="dropzone" type="button">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4M7 9l5-5 5 5M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3"/></svg>
+        <span class="dz-title">Add documents</span>
+        <span class="dz-sub">Drop PDF, Markdown or text files, or <span class="link-text">browse</span></span>
+      </button>
+      <input type="file" id="file-input" accept=".pdf,.txt,.md" multiple hidden>
+
+      <ul class="doc-list" id="doc-list" aria-live="polite"></ul>
+    </aside>
+
+    <main class="conversation">
+      <div class="thread" id="thread">
+        <div class="thread-inner" id="thread-inner" aria-live="polite"></div>
+      </div>
+
+      <form class="composer" id="composer" autocomplete="off">
+        <div class="composer-box">
+          <textarea id="question" rows="1" maxlength="2000" placeholder="Ask about your documents" aria-label="Question"></textarea>
+          <button class="send" id="send" type="submit" aria-label="Send question" disabled>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5M6 11l6-6 6 6"/></svg>
+          </button>
+        </div>
+        <p class="composer-hint">Answers cite their sources · <kbd>Enter</kbd> to send, <kbd>Shift</kbd> + <kbd>Enter</kbd> for a new line</p>
       </form>
+    </main>
+  </div>
+
+  <template id="intro-template">
+    <section class="intro">
+      <p class="eyebrow">Hybrid retrieval · cited answers</p>
+      <h1>Ask anything about<br>your documents.</h1>
+      <p class="lede">Every answer points to the exact passage and page it came from, and says so plainly when your documents don't contain the answer.</p>
+      <div class="suggestions">
+        <button type="button" class="chip" data-q="Summarize the key points of my documents.">Summarize the key points</button>
+        <button type="button" class="chip" data-q="What deadlines or time limits are mentioned?">Find deadlines and time limits</button>
+        <button type="button" class="chip" data-q="Who needs to approve what, and above which amounts?">Who approves what?</button>
+      </div>
     </section>
-  </main>
+  </template>
+
+  <div class="drop-overlay" id="drop-overlay" aria-hidden="true">
+    <div class="drop-card">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4M7 9l5-5 5 5M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3"/></svg>
+      <p>Drop to add to your library</p>
+    </div>
+  </div>
+
+  <dialog class="sheet" id="settings" aria-labelledby="settings-title">
+    <form method="dialog" id="settings-form">
+      <h2 id="settings-title">Connect</h2>
+      <p class="sheet-sub">Paste the API key for your team. It is stored only in this browser.</p>
+      <label class="field">
+        <span>API key</span>
+        <span class="field-row">
+          <input id="api-key" type="password" placeholder="rag_…" autocomplete="off" spellcheck="false">
+          <button class="btn-quiet small" id="toggle-key" type="button">Show</button>
+        </span>
+      </label>
+      <p class="sheet-note">Administrators create keys with <code>python admin.py create-key &lt;team&gt;</code>.</p>
+      <div class="sheet-actions">
+        <button class="btn-quiet" value="cancel" type="submit" formnovalidate>Cancel</button>
+        <button class="btn-primary" id="save-key" value="save" type="submit">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div class="scrim" id="scrim"></div>
+  <div class="toasts" id="toasts" role="status" aria-live="polite"></div>
+
   <script src="/app.js" type="module"></script>
 </body>
 </html>

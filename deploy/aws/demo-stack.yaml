@@ -1,0 +1,266 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  hybrid-rag demo: one Graviton EC2 instance (Docker) behind CloudFront HTTPS, reachable only through
+  CloudFront, with SSM-managed secrets, CloudWatch logs and alarms, and a cost budget.
+  Deploy with deploy/aws/deploy.sh setup <email>.
+
+Parameters:
+  AlertEmail:
+    Type: String
+    Description: Receives alarm and budget emails (confirm the SNS subscription email).
+  OriginSecret:
+    Type: String
+    NoEcho: true
+    MinLength: 32
+    Description: Shared secret CloudFront sends as X-Origin-Secret; the app rejects requests without it.
+  CloudFrontPrefixListId:
+    Type: String
+    Description: ID of com.amazonaws.global.cloudfront.origin-facing in this region (deploy.sh looks it up).
+  RepoSshUrl:
+    Type: String
+    Description: SSH clone URL of the repository (read with a deploy key stored in SSM).
+  InstanceType:
+    Type: String
+    Default: t4g.small
+    AllowedValues: [t4g.small, t4g.medium, t4g.large]
+  AmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64
+  MonthlyBudgetUsd:
+    Type: Number
+    Default: 15
+
+Resources:
+  # ---------- network: only CloudFront may reach the instance, and only on port 80 ----------
+  OriginSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: hybrid-rag origin - HTTP from CloudFront only, no SSH (use SSM Session Manager)
+      SecurityGroupIngress:
+        # The CloudFront origin-facing prefix list counts as 55 of the 60 default rules per security
+        # group, so this must stay the only inbound rule (and the IPv6 list can't be added alongside).
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourcePrefixListId: !Ref CloudFrontPrefixListId
+          Description: CloudFront origin-facing ranges
+
+  # ---------- identity: SSM management, read own secrets, write own logs ----------
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: hybrid-rag-runtime
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [ssm:GetParameter, ssm:GetParameters, ssm:GetParametersByPath]
+                Resource: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/hybrid-rag/*
+              - Effect: Allow
+                Action: kms:Decrypt
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    kms:ViaService: !Sub ssm.${AWS::Region}.amazonaws.com
+              - Effect: Allow
+                Action: [logs:CreateLogStream, logs:PutLogEvents, logs:DescribeLogStreams]
+                Resource: !GetAtt AppLogGroup.Arn
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref InstanceRole]
+
+  AppLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /hybrid-rag/app
+      RetentionInDays: 14
+
+  # ---------- compute ----------
+  Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref AmiId
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref InstanceProfile
+      SecurityGroupIds: [!GetAtt OriginSecurityGroup.GroupId]
+      # Burstable instances in "unlimited" mode bill surplus CPU credits; "standard" throttles instead.
+      CreditSpecification:
+        CPUCredits: standard
+      MetadataOptions:
+        HttpTokens: required          # IMDSv2 only
+        HttpPutResponseHopLimit: 1    # containers can't reach instance credentials
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeType: gp3
+            VolumeSize: 20
+            Encrypted: true
+            DeleteOnTermination: true
+      Tags:
+        - { Key: Name, Value: hybrid-rag-demo }
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euxo pipefail
+          dnf install -y git jq
+          printf 'REGION=%s\nLOG_GROUP=%s\n' "${AWS::Region}" "${AppLogGroup}" > /etc/hybrid-rag.conf
+          install -d -m 700 /root/.ssh
+          aws ssm get-parameter --region "${AWS::Region}" --name /hybrid-rag/deploy-key --with-decryption \
+            --query Parameter.Value --output text > /root/.ssh/hybrid-rag-deploy
+          chmod 600 /root/.ssh/hybrid-rag-deploy
+          # GitHub's SSH host keys from its TLS-authenticated API instead of trust-on-first-use ssh-keyscan,
+          # so the first clone neither hangs on a host-key prompt nor trusts an unverified key.
+          curl -fsS https://api.github.com/meta | jq -r '.ssh_keys[] | "github.com " + .' > /root/.ssh/known_hosts
+          export GIT_SSH_COMMAND="ssh -i /root/.ssh/hybrid-rag-deploy -o IdentitiesOnly=yes"
+          git clone --depth 1 "${RepoSshUrl}" /opt/hybrid-rag
+          /opt/hybrid-rag/deploy/aws/instance.sh install
+
+  ElasticIp:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      InstanceId: !Ref Instance
+
+  # ---------- edge: HTTPS on *.cloudfront.net, nothing cached, secret header to the origin ----------
+  Distribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: hybrid-rag demo
+        HttpVersion: http2and3
+        PriceClass: PriceClass_200   # includes Asia edges; PriceClass_100 serves only NA/EU locations
+        Origins:
+          - Id: ec2-origin
+            # CloudFront needs a DNS name; this is the Elastic IP's public DNS name.
+            DomainName: !Join
+              - ""
+              - - ec2-
+                - !Join ["-", !Split [".", !GetAtt ElasticIp.PublicIp]]
+                - !Sub .${AWS::Region}.compute.amazonaws.com
+            CustomOriginConfig:
+              HTTPPort: 80
+              OriginProtocolPolicy: http-only
+              OriginReadTimeout: 60
+              OriginKeepaliveTimeout: 5
+            OriginCustomHeaders:
+              - HeaderName: X-Origin-Secret
+                HeaderValue: !Ref OriginSecret
+        DefaultCacheBehavior:
+          TargetOriginId: ec2-origin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD, OPTIONS, PUT, PATCH, POST, DELETE]
+          CachedMethods: [GET, HEAD]
+          Compress: true
+          # Managed-CachingDisabled + Managed-AllViewerExceptHostHeader: every request reaches the app with
+          # all viewer headers, including Authorization (deploy.sh verifies this after deploying).
+          CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
+          OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac
+
+  # ---------- alerting ----------
+  AlertsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      Subscription:
+        - Protocol: email
+          Endpoint: !Ref AlertEmail
+
+  # Hardware/host failure: EC2 moves the instance to healthy hardware (same IP, same disk).
+  SystemRecoverAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Host failure - recover the instance
+      Namespace: AWS/EC2
+      MetricName: StatusCheckFailed_System
+      Dimensions: [{ Name: InstanceId, Value: !Ref Instance }]
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 2
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      AlarmActions:
+        - !Sub arn:aws:automate:${AWS::Region}:ec2:recover
+        - !Ref AlertsTopic
+
+  # Guest OS failure (hung kernel, memory exhaustion): reboot.
+  InstanceRebootAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Instance unreachable - reboot
+      Namespace: AWS/EC2
+      MetricName: StatusCheckFailed_Instance
+      Dimensions: [{ Name: InstanceId, Value: !Ref Instance }]
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 3
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      AlarmActions:
+        - !Sub arn:aws:automate:${AWS::Region}:ec2:reboot
+        - !Ref AlertsTopic
+
+  # The worker prints one JSON line a minute: {"event":"queue","queued":N,"oldest_age_s":S}
+  QueueAgeMetricFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref AppLogGroup
+      FilterPattern: '{ $.event = "queue" }'
+      MetricTransformations:
+        - MetricNamespace: HybridRag
+          MetricName: QueueOldestAgeSeconds
+          MetricValue: $.oldest_age_s
+          Unit: Seconds
+
+  # A document waiting 15+ minutes, or the worker going silent, means ingestion is stuck.
+  QueueBacklogAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Ingestion backlog older than 15 minutes, or worker stopped reporting
+      Namespace: HybridRag
+      MetricName: QueueOldestAgeSeconds
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 3
+      Threshold: 900
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: breaching
+      AlarmActions: [!Ref AlertsTopic]
+      OKActions: [!Ref AlertsTopic]
+
+  # Gross cost (credits excluded), so the alert fires before free-plan credits quietly run out.
+  CostBudget:
+    Type: AWS::Budgets::Budget
+    Properties:
+      Budget:
+        BudgetName: hybrid-rag-demo
+        BudgetType: COST
+        TimeUnit: MONTHLY
+        BudgetLimit: { Amount: !Ref MonthlyBudgetUsd, Unit: USD }
+        CostTypes:
+          IncludeCredit: false
+      NotificationsWithSubscribers:
+        - Notification: { NotificationType: ACTUAL, ComparisonOperator: GREATER_THAN, Threshold: 33 }
+          Subscribers: [{ SubscriptionType: EMAIL, Address: !Ref AlertEmail }]
+        - Notification: { NotificationType: FORECASTED, ComparisonOperator: GREATER_THAN, Threshold: 100 }
+          Subscribers: [{ SubscriptionType: EMAIL, Address: !Ref AlertEmail }]
+
+Outputs:
+  Url:
+    Description: Public HTTPS URL
+    Value: !Sub https://${Distribution.DomainName}
+  InstanceId:
+    Value: !Ref Instance
+  OriginIp:
+    Description: Elastic IP (not reachable directly; the security group only admits CloudFront)
+    Value: !GetAtt ElasticIp.PublicIp

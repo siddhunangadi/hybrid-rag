@@ -25,6 +25,9 @@ class Settings(BaseSettings):
     chat_model: str = "gpt-4o-mini"
     aux_model: str = "gpt-4o-mini"
     aux_timeout_s: float = 5.0
+    # Interactive OpenAI calls: timeout x (1 + retries) must stay under the edge's 60 s origin timeout.
+    openai_timeout_s: float = 20.0
+    openai_max_retries: int = 1
     ocr_model: str = "gpt-4o-mini"
 
     chunk_size: int = Field(1000, ge=200, le=6000)
@@ -39,6 +42,7 @@ class Settings(BaseSettings):
 
     max_upload_mb: int = 20
     max_pdf_pages: int = 1000
+    pdf_parse_memory_mb: int = 1024  # per sandboxed PDF child process; size with worker_concurrency
     daily_queries: int = 500
     daily_tokens: int = 300_000
     daily_upload_mb: int = 200
@@ -48,7 +52,10 @@ class Settings(BaseSettings):
     global_daily_ocr_pages: int = 100
 
     run_worker: bool = True
-    worker_concurrency: int = 2
+    worker_concurrency: int = 2  # each worker may run one PDF child of up to pdf_parse_memory_mb
+
+    # Shared secret CloudFront adds as X-Origin-Secret; empty disables the check (local development).
+    origin_secret: str = ""
     db_pool_min: int = 1
     # Keep (processes x DB_POOL_MAX) under the pooler's client limit: Supabase's
     # session pooler allows 15 on small plans. The transaction pooler allows far more.

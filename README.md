@@ -17,14 +17,31 @@ uvicorn main:app                         # http://localhost:8000; migrations app
 Docker: `docker build -t hybrid-rag . && docker run --env-file .env -p 8000:8000 hybrid-rag`.
 Requires pgvector 0.8+ (Supabase default).
 
+## Deploy to AWS
+
+A free-plan-sized demo: one Graviton EC2 instance in the database's region behind CloudFront HTTPS, reachable only
+through CloudFront, with secrets in SSM Parameter Store, logs and alarms in CloudWatch, and a cost budget
+(`deploy/aws/demo-stack.yaml`). Prerequisites: an AWS account, the AWS CLI (`aws configure`) and the GitHub CLI
+(`gh auth login`).
+
+```bash
+deploy/aws/deploy.sh setup you@example.com   # secrets from .env → SSM, deploy key, stack, smoke test; prints the URL
+deploy/aws/deploy.sh ship                    # after code changes: push main and roll it out
+deploy/aws/deploy.sh status
+```
+
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) describes the demo, the production architecture it maps to (multi-AZ
+Fargate, Aurora, SQS, WAF, CI/CD with an evaluation gate) and why each piece changes at scale.
+
 ## How it works
 
 - **Ingestion** is a durable queue in the `documents` table: uploads are stored, then claimed by workers with
   `FOR UPDATE SKIP LOCKED`. Transient failures retry (3 attempts), bad files fail immediately, a deploy hands in-flight
   jobs back to the queue, and a crashed worker's job is reclaimed after 10 minutes. Workers run inside the API by
   default; for heavy ingestion run `python ingest.py` separately and set `RUN_WORKER=false` on the API.
-- **Untrusted PDFs** are parsed and rendered in a child process that is killed after 120 s and memory-capped at 1 GB
-  (the cap is enforced on Linux, i.e. in Docker), with page (`MAX_PDF_PAGES`) and text-size limits.
+- **Untrusted PDFs** are parsed and rendered in a child process that is killed after 120 s and memory-capped
+  (`PDF_PARSE_MEMORY_MB`, default 1 GB; enforced on Linux, i.e. in Docker), with page (`MAX_PDF_PAGES`) and text-size
+  limits.
 - **Scanned PDFs** (mostly empty text layer) are rendered page by page (PDFium) and transcribed by `gpt-4o-mini` from
   high-detail images. Low-detail images and OpenAI's PDF-file input were measured to drop content, so they aren't used.
 - **Chunks carry context**: each chunk is stored and embedded as `[Document title > section]` + text, so a row cut from
@@ -60,7 +77,8 @@ that protect the OpenAI balance. OCR is metered by page rather than tokens becau
 
 ## API
 
-All endpoints except `/health` need `Authorization: Bearer <key>`.
+All endpoints except `/health` and `/ready` need `Authorization: Bearer <key>`. When `ORIGIN_SECRET` is set (behind
+CloudFront), every request except `/health` must also carry a matching `X-Origin-Secret` header.
 
 | Method | Path | Purpose |
 |---|---|---|
@@ -69,7 +87,8 @@ All endpoints except `/health` need `Authorization: Bearer <key>`.
 | DELETE | `/documents/{source}` | Delete a document and its chunks |
 | POST | `/query` | `{"question", "history": [{"role", "content"}]}` → answer, cited chunks with pages, latency, tokens |
 | POST | `/feedback` | `{"trace_id", "score": 0 or 1}` → LangSmith feedback on your own team's answers (needs tracing) |
-| GET | `/health` | DB liveness |
+| GET | `/health` | Liveness: the process is up (no dependency checks) |
+| GET | `/ready` | Readiness: the database is reachable |
 
 ## Evaluation (LangSmith)
 

@@ -1,4 +1,5 @@
 import asyncio
+import hmac
 import json
 import logging
 import time
@@ -49,7 +50,11 @@ FROM used JOIN tenants t ON t.name = $1
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.pool = await db.create_pool()
-    app.state.openai = openai.AsyncOpenAI(api_key=settings.openai_api_key, timeout=60, max_retries=3)
+    # Interactive client: (timeout x attempts) must fit inside the edge proxy's 60 s origin read timeout
+    # (CloudFront), or users see a 504 while we are still retrying. Background work uses its own patient client.
+    app.state.openai = openai.AsyncOpenAI(
+        api_key=settings.openai_api_key, timeout=settings.openai_timeout_s, max_retries=settings.openai_max_retries
+    )
     stale = await app.state.pool.fetchval("SELECT count(*) FROM chunks WHERE embed_model <> $1", settings.embed_model)
     if stale:
         log.warning("%d chunks were embedded with another model and are skipped by dense search; "
@@ -84,6 +89,18 @@ async def upstream_error(request: Request, exc: Exception) -> JSONResponse:
 
 for exc_type in (openai.APIError, asyncpg.PostgresError, asyncpg.InterfaceError, OSError):
     app.add_exception_handler(exc_type, upstream_error)
+
+
+@app.middleware("http")
+async def require_origin_secret(request: Request, call_next):
+    # Behind CloudFront, only requests carrying the distribution's secret header are served, so the
+    # origin can't be reached directly or through someone else's CloudFront distribution.
+    # /health stays open for the container's own liveness probe.
+    expected = settings.origin_secret
+    if expected and request.url.path != "/health":
+        if not hmac.compare_digest(request.headers.get("x-origin-secret", "").encode(), expected.encode()):
+            return JSONResponse(status_code=403, content={"detail": "Forbidden"})
+    return await call_next(request)
 
 
 async def current_tenant(request: Request, authorization: Annotated[str, Header()] = "") -> str:
@@ -158,9 +175,15 @@ async def pipeline(state, tenant: str, question: str, history: list[dict]) -> di
 
 
 @app.get("/health")
-async def health(request: Request):
-    await request.app.state.pool.fetchval("SELECT 1")
+async def health():
+    # Liveness only: a database blip must not get a healthy process restarted or pulled from rotation.
     return {"status": "ok"}
+
+
+@app.get("/ready")
+async def ready(request: Request):
+    await request.app.state.pool.fetchval("SELECT 1")
+    return {"status": "ready"}
 
 
 @app.post("/ingest", status_code=202)

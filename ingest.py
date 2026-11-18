@@ -27,10 +27,17 @@ OCR_CONCURRENCY = 4
 OCR_WIDTH_PX = 1024       # high-detail page images; low detail misses small print
 MAX_ATTEMPTS = 3
 PDF_PARSE_TIMEOUT_S = 120
-PDF_PARSE_MEMORY_MB = 1024
 MAX_TEXT_CHARS = 5_000_000
-HOUSEKEEPING_S = 3600
+HOUSEKEEPING_S = 3600     # prune expired feedback-ownership rows
+QUEUE_REPORT_S = 60       # log queue depth for alerting / worker autoscaling
 last_housekeeping = 0.0
+last_queue_report = 0.0
+
+QUEUE_DEPTH_SQL = """
+SELECT count(*) AS queued,
+       coalesce(extract(epoch FROM now() - min(updated_at)), 0)::int AS oldest_age_s
+FROM documents WHERE status IN ('queued', 'processing')
+"""
 
 # PDFs are untrusted: a crafted file (decompression bomb, deeply nested objects) can
 # exhaust memory or CPU inside pypdf. They are parsed in a child process with a
@@ -155,7 +162,7 @@ async def parse(filename: str, data: bytes) -> list[tuple[int | None, str]]:
 async def sandboxed(script: str, data: bytes, *args: int) -> dict:
     """Run a PDF-handling script in a memory-capped child process, killed after PDF_PARSE_TIMEOUT_S."""
     proc = await asyncio.create_subprocess_exec(
-        sys.executable, "-I", "-c", script, *map(str, args), str(PDF_PARSE_MEMORY_MB * 2**20),
+        sys.executable, "-I", "-c", script, *map(str, args), str(settings.pdf_parse_memory_mb * 2**20),
         stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
     )
     try:
@@ -333,21 +340,28 @@ async def process(pool: asyncpg.Pool, llm: AsyncOpenAI, job: asyncpg.Record) -> 
 
 
 async def housekeeping(pool: asyncpg.Pool) -> None:
-    # Feedback is only accepted for a week, so older trace ownership rows can go.
-    global last_housekeeping
-    if time.monotonic() - last_housekeeping > HOUSEKEEPING_S:
-        last_housekeeping = time.monotonic()
+    # Two independent timers: a cheap queue-depth report every minute, and the hourly prune.
+    global last_housekeeping, last_queue_report
+    now = time.monotonic()
+    if now - last_queue_report > QUEUE_REPORT_S:
+        last_queue_report = now
+        row = await pool.fetchrow(QUEUE_DEPTH_SQL)
+        # One raw JSON line a minute on stdout (no log prefix), so a CloudWatch JSON metric filter can parse it.
+        print(json.dumps({"event": "queue", "queued": row["queued"], "oldest_age_s": row["oldest_age_s"]}), flush=True)
+    if now - last_housekeeping > HOUSEKEEPING_S:
+        last_housekeeping = now
+        # Feedback is only accepted for a week, so older trace ownership rows can go.
         await pool.execute("DELETE FROM query_traces WHERE created_at < now() - interval '7 days'")
 
 
 async def worker(pool: asyncpg.Pool, llm: AsyncOpenAI, stop: asyncio.Event) -> None:
     while not stop.is_set():
         try:
+            await housekeeping(pool)  # time-gated; runs between jobs too, so a backlog keeps being reported
             job = await pool.fetchrow(CLAIM_SQL)
             if job:
                 await process(pool, llm, job)
                 continue
-            await housekeeping(pool)
         except Exception:
             log.exception("worker loop error")
         try:
