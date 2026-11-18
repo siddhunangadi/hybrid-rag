@@ -51,7 +51,8 @@ class ApiError extends Error {
 async function api(path, options = {}) {
   let res;
   try {
-    res = await fetch(path, { ...options, headers: { ...options.headers, Authorization: `Bearer ${apiKey}` } });
+    const auth = apiKey ? { Authorization: `Bearer ${apiKey}` } : {};  // no key: open-mode server
+    res = await fetch(path, { ...options, headers: { ...options.headers, ...auth } });
   } catch {
     throw new ApiError(0, "Can't reach the server. Check your connection and try again.");
   }
@@ -129,15 +130,11 @@ function renderDocs(docs, message) {
 
 async function refreshDocs() {
   clearTimeout(state.pollTimer);
-  if (!apiKey) {
-    setConn("off", "Not connected");
-    state.docsKey = "";
-    renderDocs(null);
-    return;
-  }
   try {
     const { documents } = await api("/documents");
     setConn("on", "Connected");
+    // Open-mode server: no key needed, so hide the key button unless one is already saved.
+    $("#open-settings").hidden = !apiKey;
     // Re-render only on change, so polling doesn't reset a pending delete confirmation.
     const key = JSON.stringify(documents.map((d) => [d.source, d.status, d.chunks, d.error]));
     if (key !== state.docsKey) {
@@ -146,8 +143,28 @@ async function refreshDocs() {
     }
     if (documents.some((d) => ACTIVE.has(d.status))) state.pollTimer = setTimeout(refreshDocs, 2000);
   } catch (err) {
-    setConn("bad", err.status === 401 ? "Invalid key" : "Offline");
     state.docsKey = "";
+    $("#open-settings").hidden = false;
+    if (err.status === 401 && apiKey && !state.retriedWithoutKey) {
+      // A saved key was rejected: try once without it, in case the server is in open mode.
+      state.retriedWithoutKey = true;
+      const saved = apiKey;
+      apiKey = "";
+      try {
+        await api("/documents");
+        keyStore.set("");  // open mode works, so forget the stale key
+        return refreshDocs();
+      } catch {
+        apiKey = saved;
+      }
+    }
+    if (err.status === 401 && !apiKey) {  // this server requires keys
+      setConn("off", "Not connected");
+      renderDocs(null);
+      openSettings();
+      return;
+    }
+    setConn("bad", err.status === 401 ? "Invalid key" : "Offline");
     renderDocs(null, friendly(err));
   }
 }
@@ -183,7 +200,6 @@ els.docList.addEventListener("click", async (e) => {
 async function upload(fileList) {
   const files = [...fileList];
   if (!files.length) return;
-  if (!apiKey) { openSettings(); return; }
   files.filter((f) => !SUPPORTED.test(f.name))
     .forEach((f) => toast(`${f.name}: only PDF, Markdown and text files are supported`, "error"));
   const accepted = files.filter((f) => SUPPORTED.test(f.name));
@@ -427,7 +443,6 @@ els.composer.addEventListener("submit", async (e) => {
   e.preventDefault();
   const question = els.question.value.trim();
   if (!question || state.busy) return;
-  if (!apiKey) { openSettings(); return; }
 
   state.busy = true;
   addMessage("user").textContent = question;
@@ -503,4 +518,3 @@ document.addEventListener("keydown", (e) => { if (e.key === "Escape") setLibrary
 showIntro();
 autosize();
 refreshDocs();
-if (!apiKey) openSettings();

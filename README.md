@@ -77,7 +77,7 @@ that protect the OpenAI balance. OCR is metered by page rather than tokens becau
 
 ## API
 
-All endpoints except `/health` and `/ready` need `Authorization: Bearer <key>`. When `ORIGIN_SECRET` is set (behind
+All endpoints except `/health` and `/ready` need `Authorization: Bearer <key>`. Open mode: with `PUBLIC_TENANT=public` set (the AWS demo does this), requests without a key are served as that tenant, so anyone with the URL can upload, read, delete and ask; per-team and global daily caps still apply. When `ORIGIN_SECRET` is set (behind
 CloudFront), every request except `/health` must also carry a matching `X-Origin-Secret` header.
 
 | Method | Path | Purpose |

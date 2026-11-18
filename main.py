@@ -50,6 +50,11 @@ FROM used JOIN tenants t ON t.name = $1
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.pool = await db.create_pool()
+    if settings.public_tenant:
+        await app.state.pool.execute(
+            "INSERT INTO tenants (name) VALUES ($1) ON CONFLICT DO NOTHING", settings.public_tenant
+        )
+        log.warning("open mode: requests without an API key use the public tenant '%s'", settings.public_tenant)
     # Interactive client: (timeout x attempts) must fit inside the edge proxy's 60 s origin read timeout
     # (CloudFront), or users see a 504 while we are still retrying. Background work uses its own patient client.
     app.state.openai = openai.AsyncOpenAI(
@@ -106,6 +111,8 @@ async def require_origin_secret(request: Request, call_next):
 async def current_tenant(request: Request, authorization: Annotated[str, Header()] = "") -> str:
     key = authorization.removeprefix("Bearer ").strip()
     if not key:
+        if settings.public_tenant:  # open mode: requests without a key share one public library
+            return settings.public_tenant
         raise HTTPException(401, "Missing API key", headers={"WWW-Authenticate": "Bearer"})
     digest = hash_key(key)
     cached = key_cache.get(digest)

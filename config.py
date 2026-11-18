@@ -54,6 +54,10 @@ class Settings(BaseSettings):
     run_worker: bool = True
     worker_concurrency: int = 2  # each worker may run one PDF child of up to pdf_parse_memory_mb
 
+    # Open mode: when set, requests without an API key are served as this tenant (one shared public
+    # library; daily caps still apply). Empty = every request needs a key from `admin.py create-key`.
+    public_tenant: str = ""
+
     # Shared secret CloudFront adds as X-Origin-Secret; empty disables the check (local development).
     origin_secret: str = ""
     db_pool_min: int = 1
