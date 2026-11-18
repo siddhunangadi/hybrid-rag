@@ -133,8 +133,6 @@ async function refreshDocs() {
   try {
     const { documents } = await api("/documents");
     setConn("on", "Connected");
-    // Open-mode server: no key needed, so hide the key button unless one is already saved.
-    $("#open-settings").hidden = !apiKey;
     // Re-render only on change, so polling doesn't reset a pending delete confirmation.
     const key = JSON.stringify(documents.map((d) => [d.source, d.status, d.chunks, d.error]));
     if (key !== state.docsKey) {
@@ -144,7 +142,6 @@ async function refreshDocs() {
     if (documents.some((d) => ACTIVE.has(d.status))) state.pollTimer = setTimeout(refreshDocs, 2000);
   } catch (err) {
     state.docsKey = "";
-    $("#open-settings").hidden = false;
     if (err.status === 401 && apiKey && !state.retriedWithoutKey) {
       // A saved key was rejected: try once without it, in case the server is in open mode.
       state.retriedWithoutKey = true;
@@ -486,7 +483,6 @@ function openSettings() {
   els.keyInput.focus();
 }
 
-$("#open-settings").addEventListener("click", openSettings);
 $("#toggle-key").addEventListener("click", () => {
   const show = els.keyInput.type === "password";
   els.keyInput.type = show ? "text" : "password";
